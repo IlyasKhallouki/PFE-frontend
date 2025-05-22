@@ -19,7 +19,7 @@ export default function Chat({ channel }) {
   const send = () => {
     if (!draft) return;
     // send via WS – grabbing socket from closure in useEffect
-    const ws = new WebSocket(`ws://localhost:8000/ws/${channel.id}`);
+    const ws = new WebSocket(`ws://localhost:8080/ws/${channel.id}`);
     ws.onopen = () => {
       ws.send(draft);
       setDraft("");

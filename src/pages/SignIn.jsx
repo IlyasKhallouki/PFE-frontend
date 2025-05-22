@@ -1,22 +1,22 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { signIn } from "../api";
+import { signIn } from "../lib/api";
 import { Button, TextField, Card, CardContent, Typography } from "@mui/material";
 
 export default function SignIn() {
   const nav = useNavigate();
   const [form, setForm] = useState({ email: "", password: "" });
-  const [err, setErr] = useState("");
-  const handleChange = (e) => setForm({ ...form, [e.target.name]: e.target.value });
+  const [err, setErr]   = useState("");
+
+  const handleChange = (e) =>
+    setForm({ ...form, [e.target.name]: e.target.value });
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    try {
-      await signIn(form.email, form.password);
-      nav("/home");
-    } catch (err) {
-      setErr(err.message);
-    }
+    setErr("");
+    const res = await signIn(form);        // body = {email, password}
+    if (res?.ok) nav("/home");
+    else setErr("Invalid credentials");
   };
 
   return (
@@ -26,12 +26,11 @@ export default function SignIn() {
           Sign In
         </Typography>
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-          <TextField label="Email" name="email" value={form.email} onChange={handleChange} fullWidth />
-          <TextField label="Password" name="password" type="password" value={form.password} onChange={handleChange} fullWidth />
+          <TextField label="Email"    name="email"    value={form.email}    onChange={handleChange} fullWidth />
+          <TextField label="Password" name="password" type="password"
+                     value={form.password} onChange={handleChange} fullWidth />
           {err && <Typography color="error">{err}</Typography>}
-          <Button type="submit" variant="contained">
-            Log in
-          </Button>
+          <Button type="submit" variant="contained">Log in</Button>
         </form>
       </CardContent>
     </Card>
