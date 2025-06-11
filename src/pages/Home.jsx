@@ -1,42 +1,29 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Hash, Send, Plus, X, Users, Lock, Globe, User, MessageSquare, Search, Settings, LogOut } from "lucide-react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
+import { Hash, Send, Plus, X, Lock, MessageSquare, Search, LogOut } from "lucide-react";
+import { listChannels, listUsers, listRecipients, openDm } from "../lib/api";
 
-// Enhanced API wrapper with better error handling
-const api = async (url, opts = {}) => {
-  try {
-    const res = await fetch(`http://localhost:8080${url}`, {
-      credentials: "include",
-      headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
-      ...opts,
-    });
-
+/* ------------------------------------------------------------------ */
+/*  API helper to get current user                                    */
+/* ------------------------------------------------------------------ */
+const getCurrentUser = () => {
+  return fetch("http://localhost:8080/auth/me", {
+    credentials: "include",
+    headers: { "Content-Type": "application/json" }
+  }).then(res => {
     if (res.status === 401) {
       window.location.href = "/signin";
       return null;
     }
-
-    const data = await res.json();
-    
-    if (!res.ok) {
-      throw new Error(data.detail || `HTTP ${res.status}`);
-    }
-    
-    return data;
-  } catch (error) {
-    console.error(`API Error: ${url}`, error);
-    throw error;
-  }
+    return res.json();
+  });
 };
 
-// API helpers
-const signIn = (body) => api("/auth/login", { method: "POST", body: JSON.stringify(body) });
-const listChannels = () => api("/channels");
-const listUsers = () => api("/users/");
-const listRecipients = () => api("/dms/recipients");
-const openDm = (otherId) => api(`/dms/${otherId}`, { method: "POST" });
-const searchMessages = (query, channelId) => api(`/messages/search?q=${encodeURIComponent(query)}&channel_id=${channelId}`);
+/* ------------------------------------------------------------------ */
+/*  WebSocket chat hook                                               */
+/* ------------------------------------------------------------------ */
+const WS = "ws://localhost:8080";
 
-// Enhanced WebSocket hook with reconnection
 function useChat(channelId) {
   const [messages, setMessages] = useState([]);
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
@@ -47,7 +34,7 @@ function useChat(channelId) {
   const connect = useCallback(() => {
     if (!channelId || wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const ws = new WebSocket(`ws://localhost:8080/ws/${channelId}`);
+    const ws = new WebSocket(`${WS}/ws/${channelId}`);
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -104,33 +91,10 @@ function useChat(channelId) {
   return { messages, send, connectionStatus };
 }
 
-// Enhanced Message Component with better styling
-function Message({ msg, isOwn }) {
-  const date = new Date(msg.sent_at).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-
-  return (
-    <div className={`flex items-start gap-3 p-2 hover:bg-gray-50 rounded ${isOwn ? 'flex-row-reverse' : ''}`}>
-      <div className={`h-10 w-10 rounded-full flex items-center justify-center uppercase text-sm font-medium ${
-        isOwn ? 'bg-blue-500 text-white' : 'bg-gray-300 text-gray-700'
-      }`}>
-        {msg.author[0]}
-      </div>
-      <div className={`flex-1 ${isOwn ? 'text-right' : ''}`}>
-        <div className="flex gap-2 items-baseline">
-          <span className="font-semibold text-sm">{msg.author}</span>
-          <span className="text-xs text-gray-500">{date}</span>
-        </div>
-        <p className={`mt-1 text-gray-800 ${isOwn ? 'text-right' : ''}`}>{msg.content}</p>
-      </div>
-    </div>
-  );
-}
-
-// Channel Item with icons
-function ChannelItem({ ch, active, onSelect, unreadCount = 0 }) {
+/* ------------------------------------------------------------------ */
+/*  UI helpers                                                        */
+/* ------------------------------------------------------------------ */
+function ChannelItem({ ch, active, onSelect }) {
   const isActive = active?.id === ch.id;
   
   return (
@@ -146,17 +110,11 @@ function ChannelItem({ ch, active, onSelect, unreadCount = 0 }) {
         <Hash size={16} className={isActive ? "text-blue-600" : "text-gray-500"} />
       )}
       <span className="flex-1 truncate">{ch.name}</span>
-      {unreadCount > 0 && (
-        <span className="bg-red-500 text-white text-xs rounded-full px-2 py-0.5">
-          {unreadCount}
-        </span>
-      )}
     </div>
   );
 }
 
-// Enhanced Sidebar with search
-function Sidebar({ channels, active, onSelect, onCreateDM, currentUser }) {
+function Sidebar({ channels, active, onSelect, onCreateDM, currentUser, onSignOut }) {
   const [searchTerm, setSearchTerm] = useState("");
   
   const filteredChannels = channels.filter(ch => 
@@ -180,7 +138,7 @@ function Sidebar({ channels, active, onSelect, onCreateDM, currentUser }) {
           {currentUser?.full_name?.[0] || 'U'}
         </div>
         <div className="flex-1">
-          <p className="text-sm font-medium">{currentUser?.full_name || 'User'}</p>
+          <p className="text-sm font-medium">{currentUser?.full_name || 'Loading...'}</p>
           <p className="text-xs text-gray-500">{currentUser?.role || 'Member'}</p>
         </div>
       </div>
@@ -233,13 +191,12 @@ function Sidebar({ channels, active, onSelect, onCreateDM, currentUser }) {
         </div>
       </nav>
 
-      {/* Footer Actions */}
-      <div className="p-3 border-t bg-white space-y-2">
-        <button className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors text-sm">
-          <Settings size={16} />
-          <span>Settings</span>
-        </button>
-        <button className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors text-sm text-red-600">
+      {/* Footer - Only Sign Out */}
+      <div className="p-3 border-t bg-white">
+        <button 
+          onClick={onSignOut}
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors text-sm text-red-600"
+        >
           <LogOut size={16} />
           <span>Sign Out</span>
         </button>
@@ -248,11 +205,33 @@ function Sidebar({ channels, active, onSelect, onCreateDM, currentUser }) {
   );
 }
 
-// Enhanced Chat Pane
+function Message({ msg, isOwn }) {
+  const date = new Date(msg.sent_at).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+  return (
+    <div className={`flex items-start gap-3 p-2 hover:bg-gray-50 rounded ${isOwn ? 'flex-row-reverse' : ''}`}>
+      <div className={`h-10 w-10 rounded-full flex items-center justify-center uppercase text-sm font-medium ${
+        isOwn ? 'bg-blue-500 text-white' : 'bg-gray-300 text-gray-700'
+      }`}>
+        {msg.author[0]}
+      </div>
+      <div className={`flex-1 ${isOwn ? 'text-right' : ''}`}>
+        <div className="flex gap-2 items-baseline">
+          <span className="font-semibold text-sm">{msg.author}</span>
+          <span className="text-xs text-gray-500">{date}</span>
+        </div>
+        <p className={`mt-1 text-gray-800 ${isOwn ? 'text-right' : ''}`}>{msg.content}</p>
+      </div>
+    </div>
+  );
+}
+
 function ChatPane({ channel, currentUser }) {
   const { messages, send, connectionStatus } = useChat(channel.id);
   const [draft, setDraft] = useState("");
-  const [isTyping, setIsTyping] = useState(false);
   const bottomRef = useRef();
   const inputRef = useRef();
 
@@ -346,39 +325,42 @@ function ChatPane({ channel, currentUser }) {
   );
 }
 
-// Enhanced DM Modal
+/* ------------------  DM Modal ------------------ */
 function DMModal({ open, onClose, onCreated }) {
+  const nav = useNavigate();
   const [users, setUsers] = useState([]);
   const [recipientIds, setRecipientIds] = useState([]);
-  const [selected, setSelected] = useState(null);
+  const [sel, setSel] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     if (!open) return;
     
+    setError("");
     Promise.all([listUsers(), listRecipients()])
       .then(([usersData, recipientIdsData]) => {
         setUsers(usersData);
         setRecipientIds(recipientIdsData);
       })
-      .catch(err => setError(err.message));
+      .catch(err => setError(err.message || "Failed to load users"));
   }, [open]);
 
   const createDM = async () => {
-    if (!selected) return;
+    if (!sel) return;
     
     setLoading(true);
     setError("");
     
     try {
-      const channel = await openDm(selected.id);
-      if (channel && !channel.repeated) {
-        onCreated(channel);
-        onClose();
+      const ch = await openDm(sel.id);
+      if (!ch) return;
+      if (!ch.repeated) {
+        onCreated(ch);
       }
+      onClose();
     } catch (err) {
-      setError(err.message);
+      setError(err.message || "Failed to create DM");
     } finally {
       setLoading(false);
     }
@@ -412,9 +394,9 @@ function DMModal({ open, onClose, onCreated }) {
             {candidates.map((u) => (
               <div
                 key={u.id}
-                onClick={() => setSelected(u)}
+                onClick={() => setSel(u)}
                 className={`px-4 py-3 rounded-lg cursor-pointer transition-colors flex items-center gap-3 ${
-                  selected?.id === u.id 
+                  sel?.id === u.id 
                     ? "bg-blue-100 text-blue-700" 
                     : "hover:bg-gray-100"
                 }`}
@@ -433,7 +415,7 @@ function DMModal({ open, onClose, onCreated }) {
         
         <div className="p-6 border-t">
           <button
-            disabled={!selected || loading}
+            disabled={!sel || loading}
             onClick={createDM}
             className="w-full py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg transition-colors font-medium"
           >
@@ -445,48 +427,64 @@ function DMModal({ open, onClose, onCreated }) {
   );
 }
 
-// Main App Component
+/* ------------------------------------------------------------------ */
+/*  MAIN APP                                                           */
+/* ------------------------------------------------------------------ */
 export default function EnhancedChatApp() {
+  const navigate = useNavigate();
   const [channels, setChannels] = useState([]);
-  const [activeChannel, setActiveChannel] = useState(null);
-  const [dmModalOpen, setDmModalOpen] = useState(false);
+  const [active, setActive] = useState(null);
+  const [dmModal, setDmModal] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
 
   useEffect(() => {
-    // Load initial data
-    listChannels()
-      .then((channelsData) => {
-        setChannels(channelsData);
-        if (channelsData.length > 0) {
-          setActiveChannel(channelsData[0]);
-        }
-      })
-      .catch(console.error);
+    // Load channels
+    listChannels().then((chs) => {
+      setChannels(chs);
+      if (chs.length) setActive(chs[0]);
+    }).catch(console.error);
 
-    // Mock current user - replace with actual API call
-    setCurrentUser({
-      full_name: "John Doe",
-      email: "john@company.com",
-      role: "Member"
-    });
+    // Load current user
+    getCurrentUser().then(user => {
+      if (user) {
+        setCurrentUser(user);
+      }
+    }).catch(console.error);
   }, []);
 
-  const handleDMCreated = (channel) => {
-    setChannels((prev) => [...prev, channel]);
-    setActiveChannel(channel);
+  const handleDMcreated = (ch) => {
+    setChannels((p) => [...p, ch]);
+    setActive(ch);
+  };
+
+  const handleSignOut = async () => {
+    try {
+      const res = await fetch('http://localhost:8080/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      
+      if (res.ok) {
+        navigate('/signin');
+      }
+    } catch (error) {
+      console.error('Logout failed:', error);
+    }
   };
 
   return (
     <div className="h-screen flex overflow-hidden font-sans text-gray-900 bg-gray-100">
       <Sidebar
         channels={channels}
-        active={activeChannel}
-        onSelect={setActiveChannel}
-        onCreateDM={() => setDmModalOpen(true)}
+        active={active}
+        onSelect={setActive}
+        onCreateDM={() => setDmModal(true)}
         currentUser={currentUser}
+        onSignOut={handleSignOut}
       />
-      {activeChannel ? (
-        <ChatPane channel={activeChannel} currentUser={currentUser} />
+      {active ? (
+        <ChatPane channel={active} currentUser={currentUser} />
       ) : (
         <div className="flex-1 flex items-center justify-center text-gray-500">
           <div className="text-center">
@@ -496,9 +494,9 @@ export default function EnhancedChatApp() {
         </div>
       )}
       <DMModal
-        open={dmModalOpen}
-        onClose={() => setDmModalOpen(false)}
-        onCreated={handleDMCreated}
+        open={dmModal}
+        onClose={() => setDmModal(false)}
+        onCreated={handleDMcreated}
       />
     </div>
   );
