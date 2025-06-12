@@ -19,9 +19,44 @@ const getCurrentUser = () => {
   });
 };
 
-/* ------------------------------------------------------------------ */
-/*  WebSocket chat hook                                               */
-/* ------------------------------------------------------------------ */
+
+function useSmartReplies(channelId, wsRef) {
+  const [suggestions, setSuggestions] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+
+  const requestSuggestions = useCallback(async () => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    
+    setIsLoading(true);
+    try {
+      wsRef.current.send(JSON.stringify({
+        type: "get_smart_replies"
+      }));
+    } catch (error) {
+      console.error("Error requesting smart replies:", error);
+      setIsLoading(false);
+    }
+  }, [wsRef]);
+
+  const hideSuggestions = useCallback(() => {
+    setShowSuggestions(false);
+    setSuggestions([]);
+  }, []);
+
+  return {
+    suggestions,
+    isLoading,
+    showSuggestions,
+    requestSuggestions,
+    hideSuggestions,
+    setSuggestions,
+    setIsLoading,
+    setShowSuggestions
+  };
+}
+
+
 const WS = "ws://localhost:8080";
 
 function useChat(channelId) {
@@ -30,6 +65,9 @@ function useChat(channelId) {
   const wsRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
   const reconnectAttemptsRef = useRef(0);
+
+  // Smart replies integration
+  const smartReplies = useSmartReplies(channelId, wsRef);
 
   const connect = useCallback(() => {
     if (!channelId || wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -48,6 +86,17 @@ function useChat(channelId) {
         setMessages(msg.data);
       } else if (msg.type === "message") {
         setMessages((prev) => [...prev, msg.data]);
+        // Auto-request smart replies after receiving a message (with debounce)
+        setTimeout(() => {
+          if (smartReplies.showSuggestions) {
+            smartReplies.requestSuggestions();
+          }
+        }, 500);
+      } else if (msg.type === "smart_replies") {
+        // Handle smart reply suggestions
+        smartReplies.setSuggestions(msg.data.suggestions || []);
+        smartReplies.setIsLoading(false);
+        smartReplies.setShowSuggestions(true);
       }
     };
 
@@ -57,6 +106,7 @@ function useChat(channelId) {
 
     ws.onclose = () => {
       setConnectionStatus("disconnected");
+      smartReplies.hideSuggestions();
       
       // Exponential backoff reconnection
       if (reconnectAttemptsRef.current < 5) {
@@ -67,7 +117,7 @@ function useChat(channelId) {
         }, delay);
       }
     };
-  }, [channelId]);
+  }, [channelId, smartReplies]);
 
   useEffect(() => {
     connect();
@@ -77,21 +127,25 @@ function useChat(channelId) {
         clearTimeout(reconnectTimeoutRef.current);
       }
       if (wsRef.current) {
-        wsRef.current.close();
+        // wsRef.current.close();
+        
       }
     };
   }, [connect]);
 
   const send = useCallback((text, currentUser) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
+      // Hide suggestions when sending a message
+      smartReplies.hideSuggestions();
+      
       // Immediately add user message to local state for instant feedback
       const userMessage = {
-        id: `temp-${Date.now()}`, // Temporary ID for instant display
+        id: `temp-${Date.now()}`,
         author: currentUser?.full_name || "You",
         author_id: currentUser?.id || 0,
         content: text,
         sent_at: new Date().toISOString(),
-        isTemporary: true // Flag to identify temporary messages
+        isTemporary: true
       };
       
       setMessages((prev) => [...prev, userMessage]);
@@ -99,10 +153,16 @@ function useChat(channelId) {
       // Send to server
       wsRef.current.send(text);
     }
-  }, []);
+  }, [smartReplies]);
 
-  return { messages, send, connectionStatus };
+  return { 
+    messages, 
+    send, 
+    connectionStatus,
+    smartReplies 
+  };
 }
+
 
 /* ------------------------------------------------------------------ */
 /*  UI helpers                                                        */
@@ -218,6 +278,43 @@ function Sidebar({ channels, active, onSelect, onCreateDM, currentUser, onSignOu
   );
 }
 
+function SmartReplySuggestions({ suggestions, onSelect, onClose, isLoading }) {
+  if (!suggestions.length && !isLoading) return null;
+
+  return (
+    <div className="border-t bg-gray-50 px-6 py-3">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-medium text-gray-600">Smart Replies</span>
+        <button 
+          onClick={onClose}
+          className="text-gray-400 hover:text-gray-600 text-xs"
+        >
+          ✕
+        </button>
+      </div>
+      
+      {isLoading ? (
+        <div className="flex items-center gap-2 text-sm text-gray-500">
+          <div className="animate-spin h-3 w-3 border border-gray-300 border-t-blue-500 rounded-full"></div>
+          Generating suggestions...
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {suggestions.map((suggestion, index) => (
+            <button
+              key={index}
+              onClick={() => onSelect(suggestion)}
+              className="px-3 py-1.5 bg-white border border-gray-200 rounded-full text-sm text-gray-700 hover:bg-blue-50 hover:border-blue-300 hover:text-blue-700 transition-colors"
+            >
+              {suggestion}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Message({ msg, isOwn }) {
   const date = new Date(msg.sent_at).toLocaleTimeString([], {
     hour: "2-digit",
@@ -259,7 +356,7 @@ function Message({ msg, isOwn }) {
 }
 
 function ChatPane({ channel, currentUser }) {
-  const { messages, send, connectionStatus } = useChat(channel.id);
+  const { messages, send, connectionStatus, smartReplies } = useChat(channel.id);
   const [draft, setDraft] = useState("");
   const bottomRef = useRef();
   const inputRef = useRef();
@@ -274,7 +371,6 @@ function ChatPane({ channel, currentUser }) {
 
   // Clean up temporary messages when real messages arrive from server
   const cleanedMessages = messages.reduce((acc, msg) => {
-    // If this is a real message from server and we have a temporary message with same content
     if (!msg.isTemporary) {
       const tempIndex = acc.findIndex(m => 
         m.isTemporary && 
@@ -282,7 +378,7 @@ function ChatPane({ channel, currentUser }) {
         m.author_id === msg.author_id
       );
       if (tempIndex !== -1) {
-        acc.splice(tempIndex, 1); // Remove the temporary message
+        acc.splice(tempIndex, 1);
       }
     }
     acc.push(msg);
@@ -295,10 +391,33 @@ function ChatPane({ channel, currentUser }) {
     setDraft("");
   };
 
+  const handleSmartReplySelect = (suggestion) => {
+    setDraft(suggestion);
+    smartReplies.hideSuggestions();
+    inputRef.current?.focus();
+  };
+
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
+    } else if (e.key === "Escape") {
+      smartReplies.hideSuggestions();
+    }
+  };
+
+  const handleInputFocus = () => {
+    // Request smart replies when user focuses on input (if there are recent messages)
+    if (cleanedMessages.length > 0 && !smartReplies.showSuggestions) {
+      smartReplies.requestSuggestions();
+    }
+  };
+
+  const handleInputChange = (e) => {
+    setDraft(e.target.value);
+    // Hide suggestions when user starts typing
+    if (e.target.value.length > 0 && smartReplies.showSuggestions) {
+      smartReplies.hideSuggestions();
     }
   };
 
@@ -346,18 +465,46 @@ function ChatPane({ channel, currentUser }) {
         <div ref={bottomRef} />
       </main>
 
+      {/* Smart Reply Suggestions */}
+      {smartReplies.showSuggestions && (
+        <SmartReplySuggestions
+          suggestions={smartReplies.suggestions}
+          onSelect={handleSmartReplySelect}
+          onClose={smartReplies.hideSuggestions}
+          isLoading={smartReplies.isLoading}
+        />
+      )}
+
       {/* Input */}
       <footer className="px-6 py-4 border-t">
         <div className="flex gap-3 items-end">
-          <textarea
-            ref={inputRef}
-            className="flex-1 min-h-[44px] max-h-32 px-4 py-3 border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
-            placeholder={`Message #${channel.name}`}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={handleKeyDown}
-            rows={1}
-          />
+          <div className="flex-1 relative">
+            <textarea
+              ref={inputRef}
+              className="w-full min-h-[44px] max-h-32 px-4 py-3 border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder={`Message #${channel.name}`}
+              value={draft}
+              onChange={handleInputChange}
+              onKeyDown={handleKeyDown}
+              onFocus={handleInputFocus}
+              rows={1}
+            />
+            {/* Smart Reply Toggle Button */}
+            {!smartReplies.showSuggestions && cleanedMessages.length > 0 && (
+              <button
+                onClick={smartReplies.requestSuggestions}
+                className="absolute right-2 top-2 p-1.5 text-gray-400 hover:text-blue-500 hover:bg-blue-50 rounded transition-colors"
+                title="Get smart reply suggestions"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                  <path d="M8 10h.01"/>
+                  <path d="M12 10h.01"/>
+                  <path d="M16 10h.01"/>
+                </svg>
+              </button>
+            )}
+          </div>
           <button
             onClick={handleSend}
             disabled={!draft.trim() || connectionStatus !== "connected"}
@@ -366,6 +513,18 @@ function ChatPane({ channel, currentUser }) {
             <Send size={18} />
           </button>
         </div>
+        
+        {/* Quick Smart Reply Access */}
+        {!smartReplies.showSuggestions && cleanedMessages.length > 0 && (
+          <div className="mt-2 flex items-center gap-2">
+            <button
+              onClick={smartReplies.requestSuggestions}
+              className="text-xs text-gray-500 hover:text-blue-500 transition-colors"
+            >
+              💡 Get smart replies
+            </button>
+          </div>
+        )}
       </footer>
     </section>
   );
