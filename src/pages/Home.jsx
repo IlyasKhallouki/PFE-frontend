@@ -19,7 +19,6 @@ const getCurrentUser = () => {
   });
 };
 
-
 function useSmartReplies(channelId, wsRef) {
   const [suggestions, setSuggestions] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -44,6 +43,13 @@ function useSmartReplies(channelId, wsRef) {
     setSuggestions([]);
   }, []);
 
+  // Reset smart replies when channel changes
+  useEffect(() => {
+    setShowSuggestions(false);
+    setSuggestions([]);
+    setIsLoading(false);
+  }, [channelId]);
+
   return {
     suggestions,
     isLoading,
@@ -56,7 +62,6 @@ function useSmartReplies(channelId, wsRef) {
   };
 }
 
-
 const WS = "ws://localhost:8080";
 
 function useChat(channelId) {
@@ -68,9 +73,19 @@ function useChat(channelId) {
 
   // Smart replies integration
   const smartReplies = useSmartReplies(channelId, wsRef);
+  const smartRepliesRef = useRef(smartReplies);
+  
+  useEffect(() => {
+    smartRepliesRef.current = smartReplies;
+  }, [smartReplies]);
 
   const connect = useCallback(() => {
     if (!channelId || wsRef.current?.readyState === WebSocket.OPEN) return;
+
+    // Close existing connection if any
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
 
     const ws = new WebSocket(`${WS}/ws/${channelId}`);
     wsRef.current = ws;
@@ -88,28 +103,30 @@ function useChat(channelId) {
         setMessages((prev) => [...prev, msg.data]);
         // Auto-request smart replies after receiving a message (with debounce)
         setTimeout(() => {
-          if (smartReplies.showSuggestions) {
-            smartReplies.requestSuggestions();
+          if (smartRepliesRef.current.showSuggestions) {
+            smartRepliesRef.current.requestSuggestions();
           }
         }, 500);
       } else if (msg.type === "smart_replies") {
         // Handle smart reply suggestions
-        smartReplies.setSuggestions(msg.data.suggestions || []);
-        smartReplies.setIsLoading(false);
-        smartReplies.setShowSuggestions(true);
+        smartRepliesRef.current.setSuggestions(msg.data.suggestions || []);
+        smartRepliesRef.current.setIsLoading(false);
+        smartRepliesRef.current.setShowSuggestions(true);
       }
     };
 
-    ws.onerror = () => {
+    ws.onerror = (error) => {
+      console.error("WebSocket error:", error);
       setConnectionStatus("error");
+      // Don't trigger reconnect here, let onclose handle it
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       setConnectionStatus("disconnected");
-      smartReplies.hideSuggestions();
+      smartRepliesRef.current.hideSuggestions();
       
-      // Exponential backoff reconnection
-      if (reconnectAttemptsRef.current < 5) {
+      // Only reconnect if this is the current channel's WebSocket
+      if (ws === wsRef.current && reconnectAttemptsRef.current < 5) {
         const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 10000);
         reconnectTimeoutRef.current = setTimeout(() => {
           reconnectAttemptsRef.current++;
@@ -117,9 +134,12 @@ function useChat(channelId) {
         }, delay);
       }
     };
-  }, [channelId, smartReplies]);
+  }, [channelId]);
 
   useEffect(() => {
+    // Clear messages when channel changes
+    setMessages([]);
+    
     connect();
     
     return () => {
@@ -127,8 +147,7 @@ function useChat(channelId) {
         clearTimeout(reconnectTimeoutRef.current);
       }
       if (wsRef.current) {
-        // wsRef.current.close();
-        
+        wsRef.current.close();
       }
     };
   }, [connect]);
@@ -163,16 +182,21 @@ function useChat(channelId) {
   };
 }
 
-
 /* ------------------------------------------------------------------ */
 /*  UI helpers                                                        */
 /* ------------------------------------------------------------------ */
 function ChannelItem({ ch, active, onSelect }) {
   const isActive = active?.id === ch.id;
   
+  const handleClick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onSelect(ch);
+  };
+  
   return (
     <div
-      onClick={() => onSelect(ch)}
+      onClick={handleClick}
       className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${
         isActive ? "bg-blue-100 text-blue-700" : "hover:bg-gray-100"
       }`}
@@ -295,16 +319,16 @@ function SmartReplySuggestions({ suggestions, onSelect, onClose, isLoading }) {
       
       {isLoading ? (
         <div className="flex items-center gap-2 text-sm text-gray-500">
-          <div className="animate-spin h-3 w-3 border border-gray-300 border-t-blue-500 rounded-full"></div>
-          Generating suggestions...
+          <div className="animate-spin h-4 w-4 border-2 border-gray-300 border-t-gray-600 rounded-full"></div>
+          <span>Generating suggestions...</span>
         </div>
       ) : (
         <div className="flex flex-wrap gap-2">
-          {suggestions.map((suggestion, index) => (
+          {suggestions.map((suggestion, idx) => (
             <button
-              key={index}
+              key={idx}
               onClick={() => onSelect(suggestion)}
-              className="px-3 py-1.5 bg-white border border-gray-200 rounded-full text-sm text-gray-700 hover:bg-blue-50 hover:border-blue-300 hover:text-blue-700 transition-colors"
+              className="px-3 py-1.5 bg-white border border-gray-300 rounded-full text-sm hover:bg-gray-100 hover:border-gray-400 transition-colors"
             >
               {suggestion}
             </button>
@@ -316,22 +340,23 @@ function SmartReplySuggestions({ suggestions, onSelect, onClose, isLoading }) {
 }
 
 function Message({ msg, isOwn }) {
-  const date = new Date(msg.sent_at).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
+  const date = new Date(msg.sent_at).toLocaleTimeString('en-US', { 
+    hour: 'numeric', 
+    minute: '2-digit',
+    hour12: true 
   });
 
   return (
-    <div className={`flex items-start gap-3 p-2 hover:bg-gray-50 rounded ${isOwn ? 'justify-end' : ''}`}>
-      {/* Avatar - show on left for others, right for own messages */}
+    <div className={`flex gap-3 ${isOwn ? 'flex-row-reverse' : 'flex-row'}`}>
+      {/* Avatar only for others' messages */}
       {!isOwn && (
-        <div className="h-10 w-10 rounded-full flex items-center justify-center uppercase text-sm font-medium bg-gray-300 text-gray-700">
+        <div className="h-10 w-10 rounded-full flex items-center justify-center uppercase text-sm font-medium bg-gray-300 text-gray-700 flex-shrink-0">
           {msg.author[0]}
         </div>
       )}
-      
+
       {/* Message content */}
-      <div className={`${isOwn ? 'flex flex-col items-end' : 'flex flex-col items-start'}`}>
+      <div className={`flex-1 ${isOwn ? 'flex flex-col items-end' : 'flex flex-col items-start'}`}>
         <div className="flex gap-2 items-baseline mb-1">
           <span className="font-semibold text-sm">{msg.author}</span>
           <span className="text-xs text-gray-500">{date}</span>
@@ -344,13 +369,6 @@ function Message({ msg, isOwn }) {
           <p className="whitespace-pre-wrap break-words">{msg.content}</p>
         </div>
       </div>
-
-      {/* Avatar for own messages */}
-      {isOwn && (
-        <div className="h-10 w-10 rounded-full flex items-center justify-center uppercase text-sm font-medium bg-blue-500 text-white">
-          {msg.author[0]}
-        </div>
-      )}
     </div>
   );
 }
@@ -543,29 +561,49 @@ function DMModal({ open, onClose, onCreated }) {
     if (!open) return;
     
     setError("");
-    Promise.all([listUsers(), listRecipients()])
-      .then(([usersData, recipientIdsData]) => {
-        setUsers(usersData);
-        setRecipientIds(recipientIdsData);
+    listRecipients()
+      .then(res => {
+        if (res && res.recipients) {
+          setUsers(res.recipients);
+        } else {
+          setError("Failed to load users");
+        }
       })
-      .catch(err => setError(err.message || "Failed to load users"));
+      .catch(err => {
+        console.error("Error loading recipients:", err);
+        setError("Failed to load users");
+      });
   }, [open]);
 
-  const createDM = async () => {
-    if (!sel) return;
-    
+  const handleUserToggle = (user) => {
+    if (recipientIds.includes(user.id)) {
+      setRecipientIds(recipientIds.filter(id => id !== user.id));
+    } else {
+      setRecipientIds([...recipientIds, user.id]);
+    }
+  };
+
+  const handleCreate = async () => {
+    if (recipientIds.length === 0) {
+      setError("Please select at least one user");
+      return;
+    }
+
     setLoading(true);
     setError("");
-    
+
     try {
-      const ch = await openDm(sel.id);
-      if (!ch) return;
-      if (!ch.repeated) {
-        onCreated(ch);
+      const response = await openDm(recipientIds);
+      if (response && response.id) {
+        onCreated(response);
+        onClose();
+        setRecipientIds([]);
+      } else {
+        setError("Failed to create conversation");
       }
-      onClose();
     } catch (err) {
-      setError(err.message || "Failed to create DM");
+      console.error("Error creating DM:", err);
+      setError(err.message || "Failed to create conversation");
     } finally {
       setLoading(false);
     }
@@ -575,56 +613,71 @@ function DMModal({ open, onClose, onCreated }) {
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg p-6 w-96 max-h-[80vh] overflow-y-auto">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold">Start a conversation</h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-md mx-4">
+        <div className="flex items-center justify-between p-4 border-b">
+          <h2 className="text-lg font-semibold">New Direct Message</h2>
+          <button
+            onClick={onClose}
+            className="p-1 hover:bg-gray-100 rounded transition-colors"
+          >
             <X size={20} />
           </button>
         </div>
 
-        {error && (
-          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded text-red-700 text-sm">
-            {error}
+        <div className="p-4">
+          {error && (
+            <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded">
+              {error}
+            </div>
+          )}
+
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Select users to message:
+            </label>
+            <div className="max-h-64 overflow-y-auto border rounded-lg">
+              {users.length > 0 ? (
+                users.map((user) => (
+                  <label
+                    key={user.id}
+                    className="flex items-center p-3 hover:bg-gray-50 cursor-pointer border-b last:border-b-0"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={recipientIds.includes(user.id)}
+                      onChange={() => handleUserToggle(user)}
+                      className="mr-3"
+                    />
+                    <div>
+                      <div className="font-medium">{user.full_name}</div>
+                      <div className="text-sm text-gray-500">{user.email}</div>
+                    </div>
+                  </label>
+                ))
+              ) : (
+                <div className="p-4 text-center text-gray-500">
+                  No users available
+                </div>
+              )}
+            </div>
           </div>
-        )}
 
-        <div className="space-y-2 max-h-60 overflow-y-auto">
-          {users
-            .filter(u => recipientIds.includes(u.id))
-            .map(u => (
-              <div
-                key={u.id}
-                onClick={() => setSel(u)}
-                className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-colors ${
-                  sel?.id === u.id ? "bg-blue-50 border border-blue-200" : "hover:bg-gray-50"
-                }`}
-              >
-                <div className="h-8 w-8 rounded-full bg-gray-300 flex items-center justify-center text-sm">
-                  {u.full_name[0]}
-                </div>
-                <div>
-                  <p className="font-medium text-sm">{u.full_name}</p>
-                  <p className="text-xs text-gray-500">{u.email}</p>
-                </div>
-              </div>
-            ))}
-        </div>
-
-        <div className="flex gap-2 mt-6">
-          <button
-            onClick={onClose}
-            className="flex-1 px-4 py-2 border rounded-lg hover:bg-gray-50 transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={createDM}
-            disabled={!sel || loading}
-            className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {loading ? "Creating..." : "Start Conversation"}
-          </button>
+          <div className="flex gap-3">
+            <button
+              onClick={onClose}
+              disabled={loading}
+              className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleCreate}
+              disabled={loading || recipientIds.length === 0}
+              className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {loading ? "Creating..." : "Start Conversation"}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -677,12 +730,16 @@ export default function EnhancedChatApp() {
     }
   };
 
+  const handleChannelSelect = useCallback((channel) => {
+    setActive(channel);
+  }, []);
+
   return (
     <div className="h-screen flex overflow-hidden font-sans text-gray-900 bg-gray-100">
       <Sidebar
         channels={channels}
         active={active}
-        onSelect={setActive}
+        onSelect={handleChannelSelect}
         onCreateDM={() => setDmModal(true)}
         currentUser={currentUser}
         onSignOut={handleSignOut}
