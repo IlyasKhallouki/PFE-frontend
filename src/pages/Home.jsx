@@ -82,8 +82,21 @@ function useChat(channelId) {
     };
   }, [connect]);
 
-  const send = useCallback((text) => {
+  const send = useCallback((text, currentUser) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
+      // Immediately add user message to local state for instant feedback
+      const userMessage = {
+        id: `temp-${Date.now()}`, // Temporary ID for instant display
+        author: currentUser?.full_name || "You",
+        author_id: currentUser?.id || 0,
+        content: text,
+        sent_at: new Date().toISOString(),
+        isTemporary: true // Flag to identify temporary messages
+      };
+      
+      setMessages((prev) => [...prev, userMessage]);
+      
+      // Send to server
       wsRef.current.send(text);
     }
   }, []);
@@ -212,19 +225,35 @@ function Message({ msg, isOwn }) {
   });
 
   return (
-    <div className={`flex items-start gap-3 p-2 hover:bg-gray-50 rounded ${isOwn ? 'flex-row-reverse' : ''}`}>
-      <div className={`h-10 w-10 rounded-full flex items-center justify-center uppercase text-sm font-medium ${
-        isOwn ? 'bg-blue-500 text-white' : 'bg-gray-300 text-gray-700'
-      }`}>
-        {msg.author[0]}
-      </div>
-      <div className={`flex-1 ${isOwn ? 'text-right' : ''}`}>
-        <div className="flex gap-2 items-baseline">
+    <div className={`flex items-start gap-3 p-2 hover:bg-gray-50 rounded ${isOwn ? 'justify-end' : ''}`}>
+      {/* Avatar - show on left for others, right for own messages */}
+      {!isOwn && (
+        <div className="h-10 w-10 rounded-full flex items-center justify-center uppercase text-sm font-medium bg-gray-300 text-gray-700">
+          {msg.author[0]}
+        </div>
+      )}
+      
+      {/* Message content */}
+      <div className={`${isOwn ? 'flex flex-col items-end' : 'flex flex-col items-start'}`}>
+        <div className="flex gap-2 items-baseline mb-1">
           <span className="font-semibold text-sm">{msg.author}</span>
           <span className="text-xs text-gray-500">{date}</span>
         </div>
-        <p className={`mt-1 text-gray-800 ${isOwn ? 'text-right' : ''}`}>{msg.content}</p>
+        <div className={`p-3 rounded-lg inline-block max-w-xs sm:max-w-sm md:max-w-md lg:max-w-lg xl:max-w-xl ${
+          isOwn 
+            ? 'bg-blue-500 text-white rounded-br-sm' 
+            : 'bg-gray-100 text-gray-800 rounded-bl-sm'
+        } ${msg.isTemporary ? 'opacity-70' : ''}`}>
+          <p className="whitespace-pre-wrap break-words">{msg.content}</p>
+        </div>
       </div>
+
+      {/* Avatar for own messages */}
+      {isOwn && (
+        <div className="h-10 w-10 rounded-full flex items-center justify-center uppercase text-sm font-medium bg-blue-500 text-white">
+          {msg.author[0]}
+        </div>
+      )}
     </div>
   );
 }
@@ -243,9 +272,26 @@ function ChatPane({ channel, currentUser }) {
     inputRef.current?.focus();
   }, [channel.id]);
 
+  // Clean up temporary messages when real messages arrive from server
+  const cleanedMessages = messages.reduce((acc, msg) => {
+    // If this is a real message from server and we have a temporary message with same content
+    if (!msg.isTemporary) {
+      const tempIndex = acc.findIndex(m => 
+        m.isTemporary && 
+        m.content === msg.content && 
+        m.author_id === msg.author_id
+      );
+      if (tempIndex !== -1) {
+        acc.splice(tempIndex, 1); // Remove the temporary message
+      }
+    }
+    acc.push(msg);
+    return acc;
+  }, []);
+
   const handleSend = () => {
     if (!draft.trim()) return;
-    send(draft.trim());
+    send(draft.trim(), currentUser);
     setDraft("");
   };
 
@@ -281,18 +327,18 @@ function ChatPane({ channel, currentUser }) {
 
       {/* Messages */}
       <main className="flex-1 overflow-y-auto px-6 py-4">
-        {messages.length === 0 ? (
+        {cleanedMessages.length === 0 ? (
           <div className="text-center py-12 text-gray-500">
             <MessageSquare size={48} className="mx-auto mb-4 text-gray-300" />
             <p>No messages yet. Start the conversation!</p>
           </div>
         ) : (
           <div className="space-y-1">
-            {messages.map((msg) => (
+            {cleanedMessages.map((msg) => (
               <Message 
                 key={msg.id} 
                 msg={msg} 
-                isOwn={msg.author === currentUser?.full_name}
+                isOwn={msg.author_id === currentUser?.id}
               />
             ))}
           </div>
@@ -368,56 +414,55 @@ function DMModal({ open, onClose, onCreated }) {
 
   if (!open) return null;
 
-  const candidates = users.filter((u) => recipientIds.includes(u.id));
-
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg shadow-xl w-96 max-h-[80vh] flex flex-col">
-        <div className="flex justify-between items-center p-6 border-b">
-          <h2 className="text-xl font-semibold">New Direct Message</h2>
-          <button 
-            onClick={onClose} 
-            className="p-1 rounded hover:bg-gray-100 transition-colors"
-          >
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-lg p-6 w-96 max-h-[80vh] overflow-y-auto">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold">Start a conversation</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
             <X size={20} />
           </button>
         </div>
-        
-        <div className="flex-1 overflow-y-auto p-6">
-          {error && (
-            <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">
-              {error}
-            </div>
-          )}
-          
-          <div className="space-y-2">
-            {candidates.map((u) => (
+
+        {error && (
+          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded text-red-700 text-sm">
+            {error}
+          </div>
+        )}
+
+        <div className="space-y-2 max-h-60 overflow-y-auto">
+          {users
+            .filter(u => recipientIds.includes(u.id))
+            .map(u => (
               <div
                 key={u.id}
                 onClick={() => setSel(u)}
-                className={`px-4 py-3 rounded-lg cursor-pointer transition-colors flex items-center gap-3 ${
-                  sel?.id === u.id 
-                    ? "bg-blue-100 text-blue-700" 
-                    : "hover:bg-gray-100"
+                className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-colors ${
+                  sel?.id === u.id ? "bg-blue-50 border border-blue-200" : "hover:bg-gray-50"
                 }`}
               >
                 <div className="h-8 w-8 rounded-full bg-gray-300 flex items-center justify-center text-sm">
                   {u.full_name[0]}
                 </div>
                 <div>
-                  <p className="font-medium">{u.full_name}</p>
-                  <p className="text-sm text-gray-500">{u.email}</p>
+                  <p className="font-medium text-sm">{u.full_name}</p>
+                  <p className="text-xs text-gray-500">{u.email}</p>
                 </div>
               </div>
             ))}
-          </div>
         </div>
-        
-        <div className="p-6 border-t">
+
+        <div className="flex gap-2 mt-6">
           <button
-            disabled={!sel || loading}
+            onClick={onClose}
+            className="flex-1 px-4 py-2 border rounded-lg hover:bg-gray-50 transition-colors"
+          >
+            Cancel
+          </button>
+          <button
             onClick={createDM}
-            className="w-full py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg transition-colors font-medium"
+            disabled={!sel || loading}
+            className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {loading ? "Creating..." : "Start Conversation"}
           </button>
